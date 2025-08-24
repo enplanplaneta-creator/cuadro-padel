@@ -223,8 +223,8 @@
   }
   function slotKey(court, iso){ return `${court}@@${iso}` }
 
-  // Persistencia local
-  const LS_KEYS = { matches:'padel_matches_v2', reservations:'padel_reservas_v2', isAdmin:'padel_admin_v2' };
+  // Persistencia local (nueva versión de claves para evitar caché vieja)
+  const LS_KEYS = { matches:'padel_matches_v3', reservations:'padel_reservas_v3', isAdmin:'padel_admin_v3' };
   function loadLocal(){
     try{
       const m = JSON.parse(localStorage.getItem(LS_KEYS.matches)||'{}');
@@ -264,16 +264,18 @@
     });
   }
 
+  // Reserva en servidor con doble verificación (mismo partido y misma pista+hora)
   async function reserveOnServer(matchId, court, slotISO, dur){
     const key = slotKey(court, slotISO);
     const resRef = db.collection('reservations').doc(key);
     const matchRef = db.collection('matches').doc(matchId);
     return db.runTransaction(async (tx)=>{
       const resDoc = await tx.get(resRef);
+      const mDoc   = await tx.get(matchRef);
       if(resDoc.exists) throw new Error('ESE HUECO YA FUE RESERVADO');
-      tx.set(resRef, { matchId, court, slotISO, dur, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
-      const mDoc = await tx.get(matchRef);
       const base = mDoc.exists ? mDoc.data() : {};
+      if(base && base.scheduled){ throw new Error('ESE PARTIDO YA TIENE UNA RESERVA'); }
+      tx.set(resRef, { matchId, court, slotISO, dur, createdAt: firebase.firestore.FieldValue.serverTimestamp() });
       tx.set(matchRef, { ...base, a: base.a||getMatch(matchId).a, b: base.b||getMatch(matchId).b, scheduled:{ court, slotISO, dur } }, { merge:true });
     });
   }
@@ -389,6 +391,19 @@
   function refreshSlotOptions(){
     const court = document.getElementById('courtSel').value;
     const sel = document.getElementById('slotSel');
+    const reserveBtn = document.getElementById('reserveBtn');
+    const matchId = document.getElementById('matchSel').value;
+    const already = (state.matches[matchId]||{}).scheduled;
+
+    if(already){
+      sel.innerHTML = '<option value="">(Partido ya reservado)</option>';
+      sel.disabled = true;
+      reserveBtn.disabled = true;
+      return;
+    }
+    sel.disabled = false;
+    reserveBtn.disabled = false;
+
     // mostrar solo horas libres para la pista elegida
     const options = TIME_SLOTS.filter(iso=> !state.reservations[slotKey(court, iso)] )
       .map(iso=> `<option value="${iso}">${formatSlot(iso)}</option>`).join('');
@@ -435,6 +450,10 @@
     m.textContent = '';
 
     try{
+      const already = (state.matches[matchId]||{}).scheduled;
+      if(already){
+        throw new Error(`Este partido ya tiene una reserva: ${formatSlot(already.slotISO)} · ${already.court}. Cancélala antes para cambiarla.`);
+      }
       if(!slotISO){ throw new Error('No hay horas libres en esa pista.'); }
       if(USE_FIREBASE){
         await reserveOnServer(matchId, court, slotISO, dur);
@@ -498,10 +517,6 @@
     renderBracket();
     renderAdminBadge();
     const m = document.getElementById('msg'); m.className='msg'; m.textContent='';
-  }(){
-    state.isAdmin = false; saveLocal();
-    renderBracket();
-    const m = document.getElementById('msg'); m.className='msg'; m.textContent='';
   }
 
   // Inicio
@@ -534,6 +549,7 @@
     document.getElementById('adminBtn').addEventListener('click', adminEnter);
     document.getElementById('logoutBtn').addEventListener('click', adminExit);
     document.getElementById('courtSel').addEventListener('change', refreshSlotOptions);
+    document.getElementById('matchSel').addEventListener('change', refreshSlotOptions);
 
     // Permitir pulsar Enter en el campo PIN para entrar
     const pinInput = document.getElementById('adminPin');
@@ -546,4 +562,3 @@
   </script>
 </body>
 </html>
-
